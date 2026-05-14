@@ -196,6 +196,98 @@ Add to `.cursor/mcp.json` in your project root:
 
 Add to your project's `.claude/settings.json` under `mcpServers`, using the same format as Cursor above.
 
+### LM Studio (as MCP client)
+
+LM Studio 0.3.17+ can act as an MCP host, meaning it can call this server's tools directly from its chat UI — no separate MCP client needed.
+
+> **Note:** This section is about using LM Studio as the **MCP client**. For using LM Studio as the **LLM backend** for indexing and querying, see [Section 5](#5-lm-studio-setup) below.
+
+**Requirements:**
+- LM Studio 0.3.17 or later
+- A tool-use-capable model loaded in LM Studio (e.g., Mistral Nemo Instruct, Qwen2.5 Instruct, LLaMA 3.1 Instruct, Gemma 3). Pure base models will not invoke tools reliably.
+
+**Step 1 — Edit `mcp.json`**
+
+Open LM Studio, switch to the **Program** tab in the right sidebar, then click **Install → Edit mcp.json**. This opens the config file in LM Studio's built-in editor.
+
+The file lives at:
+- **macOS / Linux:** `~/.lmstudio/mcp.json`
+- **Windows:** `%USERPROFILE%\.lmstudio\mcp.json`
+
+**Step 2 — Add the server**
+
+Paste the following, adjusting paths for your system:
+
+**macOS / Linux:**
+```json
+{
+  "mcpServers": {
+    "pageindex-local": {
+      "command": "node",
+      "args": ["/home/user/pageindex-local-mcp/dist/index.js"],
+      "env": {
+        "PAGEINDEX_REPO_PATH": "/home/user/PageIndex",
+        "PAGEINDEX_PYTHON": "python3",
+        "PAGEINDEX_WORKSPACE": "/home/user/.pageindex-local-mcp",
+        "PAGEINDEX_LLM_BASE_URL": "http://127.0.0.1:1234/v1",
+        "PAGEINDEX_LLM_API_KEY": "lm-studio",
+        "PAGEINDEX_MODEL": "your-loaded-model-name",
+        "PAGEINDEX_LOG_LEVEL": "info"
+      }
+    }
+  }
+}
+```
+
+**Windows:**
+```json
+{
+  "mcpServers": {
+    "pageindex-local": {
+      "command": "node",
+      "args": ["C:\\Users\\user\\pageindex-local-mcp\\dist\\index.js"],
+      "env": {
+        "PAGEINDEX_REPO_PATH": "C:\\Users\\user\\PageIndex",
+        "PAGEINDEX_PYTHON": "C:\\Users\\user\\miniconda3\\envs\\pageindex\\python.exe",
+        "PAGEINDEX_WORKSPACE": "C:\\Users\\user\\.pageindex-local-mcp",
+        "PAGEINDEX_LLM_BASE_URL": "http://127.0.0.1:1234/v1",
+        "PAGEINDEX_LLM_API_KEY": "lm-studio",
+        "PAGEINDEX_MODEL": "your-loaded-model-name",
+        "PAGEINDEX_LOG_LEVEL": "info"
+      }
+    }
+  }
+}
+```
+
+Set `PAGEINDEX_MODEL` to the exact model name shown in LM Studio's server status bar (e.g., `mistral-nemo-instruct-2407`). Save the file — LM Studio picks up changes immediately.
+
+**Step 3 — Enable tool use**
+
+Go to **App Settings → Tools & Integrations** and ensure tool calling is enabled. You can allow individual tools once or permanently when the confirmation dialog appears.
+
+**Step 4 — Start the LM Studio local server**
+
+The MCP server's query engine calls LM Studio's OpenAI-compatible endpoint (`http://127.0.0.1:1234/v1`) to reason over document trees. Make sure the local server is running: **Developer tab → Start Server** (default port 1234).
+
+**Step 5 — Chat with your documents**
+
+Load a tool-capable model, open a new chat, and ask naturally:
+
+```
+Index the file at /home/user/Documents/research-paper.pdf
+```
+```
+Search my indexed documents for information about climate feedback loops
+```
+```
+List all my indexed documents
+```
+
+When the model decides to call a tool, LM Studio will show a confirmation dialog with the tool name and arguments. Review and approve. Results are returned inline in the chat.
+
+> **Tip:** Run `pageindex_local_health` first to confirm the server, PageIndex repo, and Python environment are all reachable before attempting to index.
+
 ---
 
 ## 5. LM Studio Setup
