@@ -1,0 +1,35 @@
+{
+  "name": "pageindex-local-mcp",
+  "version": "0.1.0",
+  "description": "Local MCP server for PageIndex — interact with a self-hosted PageIndex installation without cloud APIs",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "pageindex-local-mcp": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "smoke:health": "tsx scripts/smoke-test.ts health",
+    "smoke:index": "tsx scripts/smoke-test.ts index",
+    "smoke:list": "tsx scripts/smoke-test.ts list",
+    "smoke:query": "tsx scripts/smoke-test.ts query"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.10.0",
+    "dotenv": "^16.4.5",
+    "fs-extra": "^11.2.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/fs-extra": "^11.0.4",
+    "@types/node": "^20.14.0",
+    "tsx": "^4.15.0",
+    "typescript": "^5.4.5",
+    "vitest": "^2.0.0"
+  }
+}

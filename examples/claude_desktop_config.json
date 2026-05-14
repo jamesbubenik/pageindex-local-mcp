@@ -1,0 +1,34 @@
+{
+  "_comment": "Add the 'pageindex-local' block inside your existing mcpServers object in claude_desktop_config.json",
+  "mcpServers": {
+    "pageindex-local": {
+      "command": "node",
+      "args": ["/home/user/pageindex-local-mcp/dist/index.js"],
+      "env": {
+        "PAGEINDEX_REPO_PATH": "/home/user/PageIndex",
+        "PAGEINDEX_PYTHON": "python3",
+        "PAGEINDEX_WORKSPACE": "/home/user/.pageindex-local-mcp",
+        "PAGEINDEX_LLM_BASE_URL": "http://127.0.0.1:1234/v1",
+        "PAGEINDEX_LLM_API_KEY": "lm-studio",
+        "PAGEINDEX_MODEL": "local-model",
+        "PAGEINDEX_ALLOWED_ROOTS": "/home/user/Documents:/home/user/Downloads",
+        "PAGEINDEX_LOG_LEVEL": "info"
+      }
+    },
+    "pageindex-local-windows": {
+      "_comment": "Windows example — adjust paths. Config file location: %APPDATA%\\Claude\\claude_desktop_config.json",
+      "command": "node",
+      "args": ["C:\\Users\\user\\pageindex-local-mcp\\dist\\index.js"],
+      "env": {
+        "PAGEINDEX_REPO_PATH": "C:\\Users\\user\\PageIndex",
+        "PAGEINDEX_PYTHON": "C:\\Users\\user\\miniconda3\\envs\\pageindex\\python.exe",
+        "PAGEINDEX_WORKSPACE": "C:\\Users\\user\\.pageindex-local-mcp",
+        "PAGEINDEX_LLM_BASE_URL": "http://127.0.0.1:1234/v1",
+        "PAGEINDEX_LLM_API_KEY": "lm-studio",
+        "PAGEINDEX_MODEL": "local-model",
+        "PAGEINDEX_ALLOWED_ROOTS": "C:\\Users\\user\\Documents;C:\\Users\\user\\Downloads",
+        "PAGEINDEX_LOG_LEVEL": "info"
+      }
+    }
+  }
+}

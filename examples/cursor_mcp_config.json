@@ -1,0 +1,18 @@
+{
+  "_comment": "Cursor MCP configuration — place in .cursor/mcp.json in your project root or as global config",
+  "mcpServers": {
+    "pageindex-local": {
+      "command": "node",
+      "args": ["/home/user/pageindex-local-mcp/dist/index.js"],
+      "env": {
+        "PAGEINDEX_REPO_PATH": "/home/user/PageIndex",
+        "PAGEINDEX_PYTHON": "python3",
+        "PAGEINDEX_WORKSPACE": "/home/user/.pageindex-local-mcp",
+        "PAGEINDEX_LLM_BASE_URL": "http://127.0.0.1:1234/v1",
+        "PAGEINDEX_LLM_API_KEY": "lm-studio",
+        "PAGEINDEX_MODEL": "local-model",
+        "PAGEINDEX_LOG_LEVEL": "info"
+      }
+    }
+  }
+}
