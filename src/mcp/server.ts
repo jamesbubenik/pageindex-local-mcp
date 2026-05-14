@@ -48,7 +48,6 @@ export function createServer(config: Config): Server {
     const { name, arguments: args } = request.params;
     const input = (args ?? {}) as Record<string, unknown>;
     const progressToken = request.params._meta?.progressToken;
-    logger.debug("Tool call received", { tool: name, hasProgressToken: progressToken !== undefined, meta: request.params._meta });
 
     try {
       switch (name) {
@@ -56,7 +55,8 @@ export function createServer(config: Config): Server {
           return await handleHealth(cli);
 
         case "pageindex_local_index_document":
-          return await handleIndexDocument(input, cli, registry, config, extra, progressToken);
+          // Non-blocking: returns in milliseconds, indexing runs in background.
+          return await handleIndexDocument(input, cli, registry, config);
 
         case "pageindex_local_list_documents":
           return await handleListDocuments(input, registry);
@@ -74,7 +74,8 @@ export function createServer(config: Config): Server {
           return await handleRemoveDocument(input, registry);
 
         case "pageindex_local_reindex_document":
-          return await handleReindexDocument(input, cli, registry, config, extra, progressToken);
+          // Also non-blocking via handleIndexDocument.
+          return await handleReindexDocument(input, cli, registry, config);
 
         default:
           return errorContent(`Unknown tool: ${name}`);
@@ -96,9 +97,8 @@ export async function startServer(config: Config): Promise<void> {
   logger.info("pageindex-local-mcp started on stdio");
 }
 
-// ---- Progress notification helper ----
+// ---- Progress notification helper (search only) ----
 
-// Minimal structural slice of RequestHandlerExtra that withProgress needs
 interface Extra {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   sendNotification: (notification: any) => Promise<void>;
@@ -106,15 +106,9 @@ interface Extra {
 type ProgressToken = string | number | undefined;
 
 /**
- * Wraps a long-running async operation with periodic keep-alive notifications to
- * prevent MCP client-side -32001 timeouts during slow indexing or search operations.
- *
- * Two notification types are sent every 5 seconds:
- *  - notifications/progress  (only when the client supplies a progressToken in _meta;
- *    clients that set resetTimeoutOnProgress will restart their request timer on each one)
- *  - notifications/message   (always; some clients reset their timer on ANY server notification)
- *
- * A heartbeat fires immediately so the client knows work started, then every 5 s.
+ * Sends periodic notifications/progress to clients that support
+ * resetTimeoutOnProgress (e.g. Claude Desktop). Used only for search —
+ * indexing is non-blocking and never needs this.
  */
 async function withProgress<T>(
   operation: () => Promise<T>,
@@ -122,35 +116,20 @@ async function withProgress<T>(
   progressToken: ProgressToken,
   message: string
 ): Promise<T> {
-  const hasToken = progressToken !== undefined && progressToken !== null;
-  let progress = 1;
+  if (progressToken === undefined || progressToken === null) {
+    return operation();
+  }
 
-  const heartbeat = (pct: number) => {
-    if (hasToken) {
-      extra
-        .sendNotification({
-          method: "notifications/progress",
-          params: { progressToken, progress: pct, total: 100, message },
-        })
-        .catch(() => {});
-    }
-    // Supplemental keep-alive: some MCP clients reset their request timer on
-    // any incoming server notification, not just progress ones.
-    extra
-      .sendNotification({
-        method: "notifications/message",
-        params: { level: "debug", data: message },
-      })
-      .catch(() => {});
-  };
-
-  // Fire immediately — tells the client work has started before the first interval.
-  heartbeat(progress);
-
+  let progress = 5;
   const interval = setInterval(() => {
     progress = Math.min(progress + 5, 92);
-    heartbeat(progress);
-  }, 5_000); // every 5 s
+    extra
+      .sendNotification({
+        method: "notifications/progress",
+        params: { progressToken, progress, total: 100, message },
+      })
+      .catch(() => {});
+  }, 5_000);
 
   try {
     return await operation();
@@ -166,13 +145,22 @@ async function handleHealth(cli: CliAdapter) {
   return jsonContent(result);
 }
 
+/**
+ * Non-blocking indexing handler.
+ *
+ * Returns in milliseconds (hash + two registry writes), then runs the
+ * Python subprocess in the background. Clients poll pageindex_local_get_document
+ * until status becomes "indexed" or "failed".
+ *
+ * This is the only design that reliably avoids MCP -32001 timeouts regardless
+ * of how long the underlying LLM-based indexing takes. Progress notifications
+ * cannot solve this because LM Studio does not reset its request timer on them.
+ */
 async function handleIndexDocument(
   input: Record<string, unknown>,
   cli: CliAdapter,
   registry: Registry,
   config: Config,
-  extra?: Extra,
-  progressToken?: ProgressToken
 ) {
   const filePath = String(input.path ?? "");
   const copyToWorkspace = input.copyToWorkspace !== false;
@@ -184,12 +172,14 @@ async function handleIndexDocument(
   validateFileExists(resolved);
   const fileType = validateFileExtension(resolved);
 
-  // --- File hash + dedup check ---
+  // --- File hash + dedup ---
   const fileHash = await sha256File(resolved);
   const existing = registry.getByHash(fileHash);
-  // A document stuck in "indexing" (e.g. from a previous crashed server session) is
-  // treated as needing re-indexing rather than returned as already-done.
+
+  // Documents stuck in "indexing" from a previous crashed session are treated as
+  // needing re-indexing rather than returned as already-done.
   const isStuckIndexing = existing?.indexStatus === "indexing";
+
   if (existing && !forceReindex && !isStuckIndexing) {
     return jsonContent({
       documentId: existing.documentId,
@@ -208,7 +198,7 @@ async function handleIndexDocument(
   if (input.documentId) {
     documentId = sanitizeDocumentId(String(input.documentId));
   } else if (existing) {
-    documentId = existing.documentId; // reuse existing ID on force-reindex
+    documentId = existing.documentId;
   } else {
     documentId = randomUUID();
   }
@@ -224,7 +214,6 @@ async function handleIndexDocument(
     addNodeText: input.addNodeText === true,
   };
 
-  // --- Upsert registry with pending status ---
   const record = registry.createRecord({
     documentId,
     sourcePath: resolved,
@@ -238,18 +227,81 @@ async function handleIndexDocument(
   await registry.upsert(record);
   await registry.updateStatus(documentId, "indexing");
 
-  // Wrap file copy + PageIndex subprocess together in withProgress so the immediate
-  // heartbeat fires before any heavy I/O begins, preventing -32001 timeouts in
-  // clients that reset their request timer on server notifications.
+  // Launch background job. setImmediate ensures the JSON response is enqueued
+  // on the MCP transport before any background work begins.
+  setImmediate(() => {
+    runIndexingJob({
+      cli, registry, config, documentId, docWorkspace,
+      fileType, fileName, fileHash, resolved, model, input, pageindexOptions, copyToWorkspace,
+    }).catch(async (e) => {
+      logger.error("Background indexing job crashed", { documentId, error: String(e) });
+      try {
+        await registry.updateStatus(documentId, "failed", { lastError: `Internal error: ${String(e)}` });
+      } catch { /* ignore — registry may be unavailable */ }
+    });
+  });
+
+  return jsonContent({
+    documentId,
+    status: "indexing",
+    fileName,
+    fileHash,
+    message:
+      `Indexing started in the background (documentId: ${documentId}). ` +
+      "Call pageindex_local_get_document with this documentId to check progress. " +
+      "Status will change to 'indexed' when complete, or 'failed' if an error occurred. " +
+      "Do NOT call pageindex_local_index_document again for this file — the job is already running.",
+  });
+}
+
+// ---- Background indexing job ----
+
+interface IndexingJobParams {
+  cli: CliAdapter;
+  registry: Registry;
+  config: Config;
+  documentId: string;
+  docWorkspace: string;
+  fileType: "pdf" | "md";
+  fileName: string;
+  fileHash: string;
+  resolved: string;
+  model: string | undefined;
+  input: Record<string, unknown>;
+  pageindexOptions: Record<string, unknown>;
+  copyToWorkspace: boolean;
+}
+
+/**
+ * Runs the full indexing pipeline: copy → Python subprocess → tree storage → registry update.
+ * All error paths are handled internally; the function always resolves.
+ * The .catch() at the call site is a last-resort safety net only.
+ */
+async function runIndexingJob(p: IndexingJobParams): Promise<void> {
+  const {
+    cli, registry, config, documentId, docWorkspace,
+    fileType, fileName, fileHash, resolved, model, input, pageindexOptions, copyToWorkspace,
+  } = p;
+
+  // Step 1: copy source to workspace
+  let workspacePath = resolved;
+  if (copyToWorkspace) {
+    try {
+      workspacePath = await cli.copySourceToWorkspace(resolved, docWorkspace);
+    } catch (e) {
+      const errMsg = `Failed to copy source to workspace: ${e}`;
+      safeWriteLogs(cli, docWorkspace, "", errMsg);
+      await registry.updateStatus(documentId, "failed", { lastError: errMsg });
+      return;
+    }
+  }
+
+  // Step 2: run PageIndex Python subprocess
   let cmdResult;
   try {
-    const runAll = async () => {
-      let workspacePath = resolved;
-      if (copyToWorkspace) {
-        workspacePath = await cli.copySourceToWorkspace(resolved, docWorkspace);
-      }
-      return fileType === "pdf"
-        ? cli.indexPdf({
+    cmdResult =
+      fileType === "pdf"
+        ? await cli.indexPdf({
             pdfPath: workspacePath,
             model,
             tocCheckPages: input.tocCheckPages != null ? Number(input.tocCheckPages) : undefined,
@@ -260,7 +312,7 @@ async function handleIndexDocument(
             addDocDescription: input.addDocDescription !== false,
             addNodeText: input.addNodeText === true,
           })
-        : cli.indexMarkdown({
+        : await cli.indexMarkdown({
             mdPath: workspacePath,
             model,
             addNodeId: input.addNodeId !== false,
@@ -271,68 +323,66 @@ async function handleIndexDocument(
             thinningThreshold: input.thinningThreshold != null ? Number(input.thinningThreshold) : undefined,
             summaryTokenThreshold: input.summaryTokenThreshold != null ? Number(input.summaryTokenThreshold) : undefined,
           });
-    };
-    cmdResult = extra
-      ? await withProgress(runAll, extra, progressToken, "Indexing document with PageIndex…")
-      : await runAll();
   } catch (e) {
     const errMsg = String(e);
-    cli.writeLogs(docWorkspace, "", errMsg);
+    safeWriteLogs(cli, docWorkspace, "", errMsg);
     await registry.updateStatus(documentId, "failed", { lastError: errMsg });
-    throw new PageIndexMcpError("INDEX_FAILED", "PageIndex CLI execution failed", errMsg);
+    return;
   }
 
-  // Save logs
-  cli.writeLogs(docWorkspace, cmdResult.stdout, cmdResult.stderr);
+  // Step 3: persist stdout/stderr logs
+  safeWriteLogs(cli, docWorkspace, cmdResult.stdout, cmdResult.stderr);
 
   if (!cmdResult.success) {
     const errMsg = `Process exited with code ${cmdResult.exitCode}.\n${cmdResult.stderr || cmdResult.stdout}`;
     await registry.updateStatus(documentId, "failed", { lastError: errMsg });
-    throw new PageIndexMcpError("INDEX_FAILED", "PageIndex returned non-zero exit code", errMsg);
+    return;
   }
 
-  // --- Discover and store tree ---
-  // When copyToWorkspace=true, the file is in docWorkspace/original/source.pdf
-  // but PageIndex uses the filename to name the output. We pass `source.pdf` so output is `source_structure.json`.
-  const sourceFileName = copyToWorkspace ? `source${fileType === "pdf" ? ".pdf" : ".md"}` : fileName;
+  // Step 4: locate the generated tree JSON
+  const sourceFileName = copyToWorkspace
+    ? `source${fileType === "pdf" ? ".pdf" : ".md"}`
+    : fileName;
   const generatedTreePath = cli.discoverGeneratedTree(sourceFileName);
 
   if (!existsSync(generatedTreePath)) {
-    // Search stdout for a path hint
-    const pathMatch = cmdResult.stdout.match(/(?:saved|output|writing).*?([^\s]+_structure\.json)/i);
-    if (!pathMatch) {
-      const errMsg = `Tree file not found at expected location: ${generatedTreePath}`;
-      await registry.updateStatus(documentId, "failed", { lastError: errMsg });
-      throw new PageIndexMcpError("TREE_NOT_FOUND", errMsg);
-    }
+    const errMsg = `Tree file not found at expected location: ${generatedTreePath}`;
+    await registry.updateStatus(documentId, "failed", { lastError: errMsg });
+    return;
   }
 
+  // Step 5: copy tree to workspace
   let treePath: string;
   try {
     treePath = await cli.storeTreeInWorkspace(generatedTreePath, docWorkspace);
   } catch (e) {
-    const errMsg = `Failed to store tree: ${e}`;
-    await registry.updateStatus(documentId, "failed", { lastError: errMsg });
-    throw new PageIndexMcpError("INDEX_FAILED", errMsg);
+    await registry.updateStatus(documentId, "failed", { lastError: `Failed to store tree: ${e}` });
+    return;
   }
 
-  // Write metadata.json
+  // Step 6: write metadata.json
   const metadataPath = join(docWorkspace, "index", "metadata.json");
-  writeFileSync(
-    metadataPath,
-    JSON.stringify({
-      documentId,
-      fileName,
-      fileType,
-      sourcePath: resolved,
-      fileHash,
-      indexedAt: new Date().toISOString(),
-      modelUsed: model ?? config.model,
-      pageindexOptions,
-    }, null, 2),
-    "utf8"
-  );
+  try {
+    writeFileSync(
+      metadataPath,
+      JSON.stringify({
+        documentId,
+        fileName,
+        fileType,
+        sourcePath: resolved,
+        fileHash,
+        indexedAt: new Date().toISOString(),
+        modelUsed: model ?? config.model,
+        pageindexOptions,
+      }, null, 2),
+      "utf8"
+    );
+  } catch (e) {
+    await registry.updateStatus(documentId, "failed", { lastError: `Failed to write metadata: ${e}` });
+    return;
+  }
 
+  // Step 7: mark as indexed
   await registry.updateStatus(documentId, "indexed", {
     treePath,
     metadataPath,
@@ -340,16 +390,16 @@ async function handleIndexDocument(
     modelUsed: model ?? config.model,
   });
 
-  return jsonContent({
-    documentId,
-    status: "indexed",
-    fileName,
-    fileHash,
-    treePath,
-    metadataPath,
-    message: "Document indexed successfully.",
-  });
+  logger.info("Document indexed successfully", { documentId, fileName });
 }
+
+function safeWriteLogs(cli: CliAdapter, docWorkspace: string, stdout: string, stderr: string): void {
+  try {
+    cli.writeLogs(docWorkspace, stdout, stderr);
+  } catch { /* ignore — disk full or permission error */ }
+}
+
+// ---- Remaining tool handlers ----
 
 async function handleListDocuments(
   input: Record<string, unknown>,
@@ -405,7 +455,6 @@ async function handleGetTree(
 
   let tree = loadTree(doc.treePath);
 
-  // Optionally strip text/summaries to reduce payload
   if (input.includeSummaries === false) {
     tree = stripField(tree, "summary") as typeof tree;
   }
@@ -512,14 +561,11 @@ async function handleReindexDocument(
   cli: CliAdapter,
   registry: Registry,
   config: Config,
-  extra?: Extra,
-  progressToken?: ProgressToken
 ) {
   const documentId = sanitizeDocumentId(String(input.documentId ?? ""));
   const doc = registry.get(documentId);
   if (!doc) throw new PageIndexMcpError("DOCUMENT_NOT_FOUND", `Document not found: ${documentId}`);
 
-  // Delegate to index handler with forceReindex
   return handleIndexDocument(
     {
       path: doc.sourcePath,
@@ -538,8 +584,6 @@ async function handleReindexDocument(
     cli,
     registry,
     config,
-    extra,
-    progressToken
   );
 }
 
