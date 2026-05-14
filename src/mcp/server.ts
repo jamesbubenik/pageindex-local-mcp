@@ -48,6 +48,7 @@ export function createServer(config: Config): Server {
     const { name, arguments: args } = request.params;
     const input = (args ?? {}) as Record<string, unknown>;
     const progressToken = request.params._meta?.progressToken;
+    logger.debug("Tool call received", { tool: name, hasProgressToken: progressToken !== undefined, meta: request.params._meta });
 
     try {
       switch (name) {
@@ -105,12 +106,15 @@ interface Extra {
 type ProgressToken = string | number | undefined;
 
 /**
- * Wraps a long-running async operation with periodic MCP progress notifications.
- * Clients that advertise resetTimeoutOnProgress will restart their request timer
- * on each notification, preventing -32001 timeouts for slow operations.
+ * Wraps a long-running async operation with periodic keep-alive notifications to
+ * prevent MCP client-side -32001 timeouts during slow indexing or search operations.
  *
- * Progress notifications are only sent when the client supplies a progressToken
- * in request._meta (compliant clients such as LM Studio and Claude Desktop do this).
+ * Two notification types are sent every 5 seconds:
+ *  - notifications/progress  (only when the client supplies a progressToken in _meta;
+ *    clients that set resetTimeoutOnProgress will restart their request timer on each one)
+ *  - notifications/message   (always; some clients reset their timer on ANY server notification)
+ *
+ * A heartbeat fires immediately so the client knows work started, then every 5 s.
  */
 async function withProgress<T>(
   operation: () => Promise<T>,
@@ -118,22 +122,35 @@ async function withProgress<T>(
   progressToken: ProgressToken,
   message: string
 ): Promise<T> {
-  if (progressToken === undefined || progressToken === null) {
-    return operation();
-  }
+  const hasToken = progressToken !== undefined && progressToken !== null;
+  let progress = 1;
 
-  let progress = 5;
-  const interval = setInterval(() => {
-    progress = Math.min(progress + 3, 92);
+  const heartbeat = (pct: number) => {
+    if (hasToken) {
+      extra
+        .sendNotification({
+          method: "notifications/progress",
+          params: { progressToken, progress: pct, total: 100, message },
+        })
+        .catch(() => {});
+    }
+    // Supplemental keep-alive: some MCP clients reset their request timer on
+    // any incoming server notification, not just progress ones.
     extra
       .sendNotification({
-        method: "notifications/progress",
-        params: { progressToken, progress, total: 100, message },
+        method: "notifications/message",
+        params: { level: "debug", data: message },
       })
-      .catch(() => {
-        // client may have disconnected — ignore silently
-      });
-  }, 10_000); // every 10 s
+      .catch(() => {});
+  };
+
+  // Fire immediately — tells the client work has started before the first interval.
+  heartbeat(progress);
+
+  const interval = setInterval(() => {
+    progress = Math.min(progress + 5, 92);
+    heartbeat(progress);
+  }, 5_000); // every 5 s
 
   try {
     return await operation();

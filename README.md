@@ -267,16 +267,18 @@ Paste the following, adjusting paths for your system:
 
 Set `PAGEINDEX_MODEL` to the exact model name shown in LM Studio's server status bar (e.g., `mistral-nemo-instruct-2407`). Save the file — LM Studio picks up changes immediately.
 
-**Timeout configuration**
+**Timeout configuration — required for large PDFs**
 
-Indexing large PDFs can take several minutes. Two settings work together to prevent `MCP error -32001: Request timed out`:
+Indexing a PDF can take several minutes because PageIndex makes multiple LLM calls. LM Studio's default MCP request timeout is 60 seconds, which is not long enough. You **must** set two values or you will see `MCP error -32001: Request timed out`:
 
-| Setting | Where | What it controls |
+| Setting | Where | What it does |
 |---|---|---|
-| `"timeout": 600` | `mcp.json` (Cursor-notation) | Client-side wait (seconds). LM Studio and Cursor respect this field. |
-| `PAGEINDEX_TOOL_TIMEOUT_MS=600000` | `env` block or `.env` file | Server-side subprocess limit (milliseconds). The server aborts Python if it exceeds this. |
+| `"timeout": 600` | `mcp.json` server entry | Tells LM Studio to wait up to 600 seconds (10 min) for a tool response |
+| `PAGEINDEX_TOOL_TIMEOUT_MS=600000` | `env` block or `.env` | Tells the server how long to let the Python subprocess run before killing it |
 
-Keep both values in sync — `timeout` in seconds equals `PAGEINDEX_TOOL_TIMEOUT_MS` divided by 1000. The server also sends MCP progress notifications every 10 seconds during indexing and search, which resets the client timer on clients that support `resetTimeoutOnProgress` (Claude Desktop, Claude Code, and Cursor all do).
+Both values are already included in the example configs above. **Make sure they are present in your actual `mcp.json`** — LM Studio does not have a default that is long enough.
+
+The server also sends heartbeat notifications every 5 seconds while indexing or searching. Clients that support `resetTimeoutOnProgress` (Claude Desktop, Cursor, Claude Code) will reset their timer on each one. LM Studio will additionally receive supplemental log notifications that may reset its connection timer depending on version.
 
 **Step 3 — Enable tool use**
 
@@ -515,12 +517,16 @@ Add the file's parent directory to `PAGEINDEX_ALLOWED_ROOTS` in your environment
 PageIndex uses PyPDF2 for local PDF parsing, which does not perform OCR. Scanned PDFs without embedded text will produce poor results. For scanned documents, consider pre-processing with an OCR tool or using the PageIndex cloud service.
 
 **`MCP error -32001: Request timed out` in LM Studio (or other clients)**
-Indexing large documents or running multi-step searches can exceed the MCP client's default 60-second timeout. Fix with two coordinated settings:
 
-1. Add `"timeout": 600` (seconds) to your `mcp.json` server entry so the client waits longer.
-2. Set `PAGEINDEX_TOOL_TIMEOUT_MS=600000` (milliseconds) in the `env` block or your `.env` file so the server-side subprocess limit matches.
+The timeout is enforced by the MCP **client**, not this server. LM Studio's default is 60 seconds — not long enough for PDF indexing.
 
-The server also sends progress notifications every 10 seconds during indexing and search. Clients that support `resetTimeoutOnProgress` (Claude Desktop, Cursor, Claude Code) will automatically reset their timer on each notification, keeping the connection alive for the full duration of the operation without requiring a timeout increase.
+Checklist (do all three):
+
+1. **`"timeout": 600` must be present in your `mcp.json`** under the server entry. This raises LM Studio's per-request timeout to 10 minutes. Without this field, LM Studio uses 60 seconds regardless of how fast the server is.
+2. **`PAGEINDEX_TOOL_TIMEOUT_MS=600000`** in the `env` block (or `.env`) — keeps the server-side Python subprocess limit in sync.
+3. **Restart LM Studio** after editing `mcp.json` — changes are not always picked up without a restart.
+
+The server sends heartbeat notifications every 5 seconds (progress + log) while indexing and searching. If you are still seeing `-32001` after adding `"timeout": 600`, set `PAGEINDEX_LOG_LEVEL=debug` and check the stderr output to confirm whether `hasProgressToken: true` appears — if it does, LM Studio is sending progress tokens and the heartbeats are active. If `hasProgressToken: false`, the heartbeats are log-only and you must rely on the `"timeout"` field.
 
 **MCP server logs**
 All logs go to stderr (not stdout, which is reserved for the MCP protocol). Check your MCP client's stderr console or increase log level:
