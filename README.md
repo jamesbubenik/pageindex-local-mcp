@@ -73,7 +73,7 @@ Or set the model via the `--model` argument at indexing time.
 ## 2. Install the MCP Server
 
 ```bash
-git clone https://github.com/youruser/pageindex-local-mcp.git
+git clone https://github.com/jamesbubenik/pageindex-local-mcp.git
 cd pageindex-local-mcp
 npm install
 npm run build
