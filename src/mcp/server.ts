@@ -187,7 +187,10 @@ async function handleIndexDocument(
   // --- File hash + dedup check ---
   const fileHash = await sha256File(resolved);
   const existing = registry.getByHash(fileHash);
-  if (existing && !forceReindex) {
+  // A document stuck in "indexing" (e.g. from a previous crashed server session) is
+  // treated as needing re-indexing rather than returned as already-done.
+  const isStuckIndexing = existing?.indexStatus === "indexing";
+  if (existing && !forceReindex && !isStuckIndexing) {
     return jsonContent({
       documentId: existing.documentId,
       status: existing.indexStatus,
@@ -235,17 +238,17 @@ async function handleIndexDocument(
   await registry.upsert(record);
   await registry.updateStatus(documentId, "indexing");
 
-  // --- Copy source to workspace ---
-  let workspacePath = resolved;
-  if (copyToWorkspace) {
-    workspacePath = await cli.copySourceToWorkspace(resolved, docWorkspace);
-  }
-
-  // --- Run PageIndex (wrapped with progress notifications to prevent client-side timeouts) ---
+  // Wrap file copy + PageIndex subprocess together in withProgress so the immediate
+  // heartbeat fires before any heavy I/O begins, preventing -32001 timeouts in
+  // clients that reset their request timer on server notifications.
   let cmdResult;
   try {
-    const runIndex = () =>
-      fileType === "pdf"
+    const runAll = async () => {
+      let workspacePath = resolved;
+      if (copyToWorkspace) {
+        workspacePath = await cli.copySourceToWorkspace(resolved, docWorkspace);
+      }
+      return fileType === "pdf"
         ? cli.indexPdf({
             pdfPath: workspacePath,
             model,
@@ -262,16 +265,16 @@ async function handleIndexDocument(
             model,
             addNodeId: input.addNodeId !== false,
             addNodeSummary: input.addNodeSummary !== false,
-        addDocDescription: input.addDocDescription !== false,
-        addNodeText: input.addNodeText === true,
-        ifThinning: input.ifThinning != null ? Boolean(input.ifThinning) : undefined,
-        thinningThreshold: input.thinningThreshold != null ? Number(input.thinningThreshold) : undefined,
-        summaryTokenThreshold: input.summaryTokenThreshold != null ? Number(input.summaryTokenThreshold) : undefined,
+            addDocDescription: input.addDocDescription !== false,
+            addNodeText: input.addNodeText === true,
+            ifThinning: input.ifThinning != null ? Boolean(input.ifThinning) : undefined,
+            thinningThreshold: input.thinningThreshold != null ? Number(input.thinningThreshold) : undefined,
+            summaryTokenThreshold: input.summaryTokenThreshold != null ? Number(input.summaryTokenThreshold) : undefined,
           });
-
+    };
     cmdResult = extra
-      ? await withProgress(runIndex, extra, progressToken, "Indexing document with PageIndex…")
-      : await runIndex();
+      ? await withProgress(runAll, extra, progressToken, "Indexing document with PageIndex…")
+      : await runAll();
   } catch (e) {
     const errMsg = String(e);
     cli.writeLogs(docWorkspace, "", errMsg);
