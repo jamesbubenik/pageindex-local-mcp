@@ -154,7 +154,7 @@ export class CliAdapter {
     try {
       return await runCommand(this.python, args, {
         cwd: this.repoPath,
-        env: extraEnv,
+        env: { ...this.getSubprocessEnv(), ...extraEnv },
         timeoutMs: this.config.toolTimeoutMs,
       });
     } catch (e: unknown) {
@@ -207,6 +207,30 @@ export class CliAdapter {
 
   // ---- Private helpers ----
 
+  /**
+   * litellm requires a provider-prefixed model name (e.g. "openai/my-model").
+   * Auto-prefix with "openai/" when the name has no "/" for local endpoints.
+   */
+  private litellmModel(model: string): string {
+    return model.includes("/") ? model : `openai/${model}`;
+  }
+
+  /**
+   * Build env vars that litellm needs to reach the local LLM endpoint.
+   * These are merged into the Python subprocess environment.
+   */
+  private getSubprocessEnv(): Record<string, string> {
+    const env: Record<string, string> = {};
+    if (this.config.llmBaseUrl) {
+      env["OPENAI_API_BASE"] = this.config.llmBaseUrl;
+      env["OPENAI_BASE_URL"] = this.config.llmBaseUrl;
+    }
+    if (this.config.llmApiKey) {
+      env["OPENAI_API_KEY"] = this.config.llmApiKey;
+    }
+    return env;
+  }
+
   private assertRepoReady(): void {
     if (!this.repoPath) {
       throw new PageIndexMcpError(
@@ -241,7 +265,7 @@ export class CliAdapter {
     const args = [RUN_SCRIPT, "--pdf_path", o.pdfPath];
 
     const model = o.model ?? c.model;
-    if (model) args.push("--model", model);
+    if (model) args.push("--model", this.litellmModel(model));
 
     const toc = o.tocCheckPages ?? c.tocCheckPages;
     if (toc) args.push("--toc-check-pages", String(toc));
@@ -278,7 +302,7 @@ export class CliAdapter {
     const args = [RUN_SCRIPT, "--md_path", o.mdPath];
 
     const model = o.model ?? c.model;
-    if (model) args.push("--model", model);
+    if (model) args.push("--model", this.litellmModel(model));
 
     args.push("--if-add-node-id", this.yesNo(o.addNodeId, true));
     args.push("--if-add-node-summary", this.yesNo(o.addNodeSummary, true));
