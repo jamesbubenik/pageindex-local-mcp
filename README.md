@@ -112,6 +112,7 @@ PAGEINDEX_MODEL=local-model
 | `PAGEINDEX_LLM_BASE_URL` | No | `http://127.0.0.1:1234/v1` | OpenAI-compatible endpoint for queries |
 | `PAGEINDEX_LLM_API_KEY` | No | `local` | API key (any non-empty value for local servers) |
 | `PAGEINDEX_LLM_TIMEOUT_MS` | No | `120000` | LLM request timeout (ms) |
+| `PAGEINDEX_TOOL_TIMEOUT_MS` | No | `600000` | Max ms for a PageIndex Python subprocess. Raise for large PDFs or slow machines. |
 | `PAGEINDEX_TOC_CHECK_PAGES` | No | `20` | Pages scanned for TOC (PDF only) |
 | `PAGEINDEX_MAX_PAGES_PER_NODE` | No | `10` | Max pages per tree node (PDF only) |
 | `PAGEINDEX_MAX_TOKENS_PER_NODE` | No | `20000` | Max tokens per tree node |
@@ -225,6 +226,7 @@ Paste the following, adjusting paths for your system:
     "pageindex-local": {
       "command": "node",
       "args": ["/home/user/pageindex-local-mcp/dist/index.js"],
+      "timeout": 600,
       "env": {
         "PAGEINDEX_REPO_PATH": "/home/user/PageIndex",
         "PAGEINDEX_PYTHON": "python3",
@@ -232,6 +234,7 @@ Paste the following, adjusting paths for your system:
         "PAGEINDEX_LLM_BASE_URL": "http://127.0.0.1:1234/v1",
         "PAGEINDEX_LLM_API_KEY": "lm-studio",
         "PAGEINDEX_MODEL": "your-loaded-model-name",
+        "PAGEINDEX_TOOL_TIMEOUT_MS": "600000",
         "PAGEINDEX_LOG_LEVEL": "info"
       }
     }
@@ -246,6 +249,7 @@ Paste the following, adjusting paths for your system:
     "pageindex-local": {
       "command": "node",
       "args": ["C:\\Users\\user\\pageindex-local-mcp\\dist\\index.js"],
+      "timeout": 600,
       "env": {
         "PAGEINDEX_REPO_PATH": "C:\\Users\\user\\PageIndex",
         "PAGEINDEX_PYTHON": "C:\\Users\\user\\miniconda3\\envs\\pageindex\\python.exe",
@@ -253,6 +257,7 @@ Paste the following, adjusting paths for your system:
         "PAGEINDEX_LLM_BASE_URL": "http://127.0.0.1:1234/v1",
         "PAGEINDEX_LLM_API_KEY": "lm-studio",
         "PAGEINDEX_MODEL": "your-loaded-model-name",
+        "PAGEINDEX_TOOL_TIMEOUT_MS": "600000",
         "PAGEINDEX_LOG_LEVEL": "info"
       }
     }
@@ -261,6 +266,17 @@ Paste the following, adjusting paths for your system:
 ```
 
 Set `PAGEINDEX_MODEL` to the exact model name shown in LM Studio's server status bar (e.g., `mistral-nemo-instruct-2407`). Save the file — LM Studio picks up changes immediately.
+
+**Timeout configuration**
+
+Indexing large PDFs can take several minutes. Two settings work together to prevent `MCP error -32001: Request timed out`:
+
+| Setting | Where | What it controls |
+|---|---|---|
+| `"timeout": 600` | `mcp.json` (Cursor-notation) | Client-side wait (seconds). LM Studio and Cursor respect this field. |
+| `PAGEINDEX_TOOL_TIMEOUT_MS=600000` | `env` block or `.env` file | Server-side subprocess limit (milliseconds). The server aborts Python if it exceeds this. |
+
+Keep both values in sync — `timeout` in seconds equals `PAGEINDEX_TOOL_TIMEOUT_MS` divided by 1000. The server also sends MCP progress notifications every 10 seconds during indexing and search, which resets the client timer on clients that support `resetTimeoutOnProgress` (Claude Desktop, Claude Code, and Cursor all do).
 
 **Step 3 — Enable tool use**
 
@@ -497,6 +513,14 @@ Add the file's parent directory to `PAGEINDEX_ALLOWED_ROOTS` in your environment
 
 **Low-quality indexing results on scanned PDFs**
 PageIndex uses PyPDF2 for local PDF parsing, which does not perform OCR. Scanned PDFs without embedded text will produce poor results. For scanned documents, consider pre-processing with an OCR tool or using the PageIndex cloud service.
+
+**`MCP error -32001: Request timed out` in LM Studio (or other clients)**
+Indexing large documents or running multi-step searches can exceed the MCP client's default 60-second timeout. Fix with two coordinated settings:
+
+1. Add `"timeout": 600` (seconds) to your `mcp.json` server entry so the client waits longer.
+2. Set `PAGEINDEX_TOOL_TIMEOUT_MS=600000` (milliseconds) in the `env` block or your `.env` file so the server-side subprocess limit matches.
+
+The server also sends progress notifications every 10 seconds during indexing and search. Clients that support `resetTimeoutOnProgress` (Claude Desktop, Cursor, Claude Code) will automatically reset their timer on each notification, keeping the connection alive for the full duration of the operation without requiring a timeout increase.
 
 **MCP server logs**
 All logs go to stderr (not stdout, which is reserved for the MCP protocol). Check your MCP client's stderr console or increase log level:

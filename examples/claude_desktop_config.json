@@ -4,6 +4,7 @@
     "pageindex-local": {
       "command": "node",
       "args": ["/home/user/pageindex-local-mcp/dist/index.js"],
+      "timeout": 600,
       "env": {
         "PAGEINDEX_REPO_PATH": "/home/user/PageIndex",
         "PAGEINDEX_PYTHON": "python3",
@@ -12,6 +13,7 @@
         "PAGEINDEX_LLM_API_KEY": "lm-studio",
         "PAGEINDEX_MODEL": "local-model",
         "PAGEINDEX_ALLOWED_ROOTS": "/home/user/Documents:/home/user/Downloads",
+        "PAGEINDEX_TOOL_TIMEOUT_MS": "600000",
         "PAGEINDEX_LOG_LEVEL": "info"
       }
     },
@@ -19,6 +21,7 @@
       "_comment": "Windows example — adjust paths. Config file location: %APPDATA%\\Claude\\claude_desktop_config.json",
       "command": "node",
       "args": ["C:\\Users\\user\\pageindex-local-mcp\\dist\\index.js"],
+      "timeout": 600,
       "env": {
         "PAGEINDEX_REPO_PATH": "C:\\Users\\user\\PageIndex",
         "PAGEINDEX_PYTHON": "C:\\Users\\user\\miniconda3\\envs\\pageindex\\python.exe",
@@ -27,6 +30,7 @@
         "PAGEINDEX_LLM_API_KEY": "lm-studio",
         "PAGEINDEX_MODEL": "local-model",
         "PAGEINDEX_ALLOWED_ROOTS": "C:\\Users\\user\\Documents;C:\\Users\\user\\Downloads",
+        "PAGEINDEX_TOOL_TIMEOUT_MS": "600000",
         "PAGEINDEX_LOG_LEVEL": "info"
       }
     }

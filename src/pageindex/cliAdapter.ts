@@ -155,7 +155,7 @@ export class CliAdapter {
       return await runCommand(this.python, args, {
         cwd: this.repoPath,
         env: extraEnv,
-        timeoutMs: 600_000, // 10 min — indexing large docs can take time
+        timeoutMs: this.config.toolTimeoutMs,
       });
     } catch (e: unknown) {
       const err = e as { result?: CommandResult; message?: string };

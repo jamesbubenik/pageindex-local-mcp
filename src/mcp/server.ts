@@ -8,7 +8,7 @@ import { join, basename } from "node:path";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Config } from "../config.js";
-import type { DocumentRecord, IndexOptions } from "../pageindex/types.js";
+import type { DocumentRecord } from "../pageindex/types.js";
 import { TOOL_DEFINITIONS } from "./tools.js";
 import { CliAdapter } from "../pageindex/cliAdapter.js";
 import { Registry } from "../pageindex/registry.js";
@@ -44,9 +44,10 @@ export function createServer(config: Config): Server {
     tools: TOOL_DEFINITIONS,
   }));
 
-  server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
     const { name, arguments: args } = request.params;
     const input = (args ?? {}) as Record<string, unknown>;
+    const progressToken = request.params._meta?.progressToken;
 
     try {
       switch (name) {
@@ -54,7 +55,7 @@ export function createServer(config: Config): Server {
           return await handleHealth(cli);
 
         case "pageindex_local_index_document":
-          return await handleIndexDocument(input, cli, registry, config);
+          return await handleIndexDocument(input, cli, registry, config, extra, progressToken);
 
         case "pageindex_local_list_documents":
           return await handleListDocuments(input, registry);
@@ -66,13 +67,13 @@ export function createServer(config: Config): Server {
           return await handleGetTree(input, registry);
 
         case "pageindex_local_search":
-          return await handleSearch(input, registry, config);
+          return await handleSearch(input, registry, config, extra, progressToken);
 
         case "pageindex_local_remove_document":
           return await handleRemoveDocument(input, registry);
 
         case "pageindex_local_reindex_document":
-          return await handleReindexDocument(input, cli, registry, config);
+          return await handleReindexDocument(input, cli, registry, config, extra, progressToken);
 
         default:
           return errorContent(`Unknown tool: ${name}`);
@@ -94,6 +95,53 @@ export async function startServer(config: Config): Promise<void> {
   logger.info("pageindex-local-mcp started on stdio");
 }
 
+// ---- Progress notification helper ----
+
+// Minimal structural slice of RequestHandlerExtra that withProgress needs
+interface Extra {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  sendNotification: (notification: any) => Promise<void>;
+}
+type ProgressToken = string | number | undefined;
+
+/**
+ * Wraps a long-running async operation with periodic MCP progress notifications.
+ * Clients that advertise resetTimeoutOnProgress will restart their request timer
+ * on each notification, preventing -32001 timeouts for slow operations.
+ *
+ * Progress notifications are only sent when the client supplies a progressToken
+ * in request._meta (compliant clients such as LM Studio and Claude Desktop do this).
+ */
+async function withProgress<T>(
+  operation: () => Promise<T>,
+  extra: Extra,
+  progressToken: ProgressToken,
+  message: string
+): Promise<T> {
+  if (progressToken === undefined || progressToken === null) {
+    return operation();
+  }
+
+  let progress = 5;
+  const interval = setInterval(() => {
+    progress = Math.min(progress + 3, 92);
+    extra
+      .sendNotification({
+        method: "notifications/progress",
+        params: { progressToken, progress, total: 100, message },
+      })
+      .catch(() => {
+        // client may have disconnected — ignore silently
+      });
+  }, 10_000); // every 10 s
+
+  try {
+    return await operation();
+  } finally {
+    clearInterval(interval);
+  }
+}
+
 // ---- Tool handlers ----
 
 async function handleHealth(cli: CliAdapter) {
@@ -105,7 +153,9 @@ async function handleIndexDocument(
   input: Record<string, unknown>,
   cli: CliAdapter,
   registry: Registry,
-  config: Config
+  config: Config,
+  extra?: Extra,
+  progressToken?: ProgressToken
 ) {
   const filePath = String(input.path ?? "");
   const copyToWorkspace = input.copyToWorkspace !== false;
@@ -174,34 +224,37 @@ async function handleIndexDocument(
     workspacePath = await cli.copySourceToWorkspace(resolved, docWorkspace);
   }
 
-  // --- Run PageIndex ---
+  // --- Run PageIndex (wrapped with progress notifications to prevent client-side timeouts) ---
   let cmdResult;
   try {
-    if (fileType === "pdf") {
-      cmdResult = await cli.indexPdf({
-        pdfPath: workspacePath,
-        model,
-        tocCheckPages: input.tocCheckPages != null ? Number(input.tocCheckPages) : undefined,
-        maxPagesPerNode: input.maxPagesPerNode != null ? Number(input.maxPagesPerNode) : undefined,
-        maxTokensPerNode: input.maxTokensPerNode != null ? Number(input.maxTokensPerNode) : undefined,
-        addNodeId: input.addNodeId !== false,
-        addNodeSummary: input.addNodeSummary !== false,
-        addDocDescription: input.addDocDescription !== false,
-        addNodeText: input.addNodeText === true,
-      });
-    } else {
-      cmdResult = await cli.indexMarkdown({
-        mdPath: workspacePath,
-        model,
-        addNodeId: input.addNodeId !== false,
-        addNodeSummary: input.addNodeSummary !== false,
+    const runIndex = () =>
+      fileType === "pdf"
+        ? cli.indexPdf({
+            pdfPath: workspacePath,
+            model,
+            tocCheckPages: input.tocCheckPages != null ? Number(input.tocCheckPages) : undefined,
+            maxPagesPerNode: input.maxPagesPerNode != null ? Number(input.maxPagesPerNode) : undefined,
+            maxTokensPerNode: input.maxTokensPerNode != null ? Number(input.maxTokensPerNode) : undefined,
+            addNodeId: input.addNodeId !== false,
+            addNodeSummary: input.addNodeSummary !== false,
+            addDocDescription: input.addDocDescription !== false,
+            addNodeText: input.addNodeText === true,
+          })
+        : cli.indexMarkdown({
+            mdPath: workspacePath,
+            model,
+            addNodeId: input.addNodeId !== false,
+            addNodeSummary: input.addNodeSummary !== false,
         addDocDescription: input.addDocDescription !== false,
         addNodeText: input.addNodeText === true,
         ifThinning: input.ifThinning != null ? Boolean(input.ifThinning) : undefined,
         thinningThreshold: input.thinningThreshold != null ? Number(input.thinningThreshold) : undefined,
         summaryTokenThreshold: input.summaryTokenThreshold != null ? Number(input.summaryTokenThreshold) : undefined,
-      });
-    }
+          });
+
+    cmdResult = extra
+      ? await withProgress(runIndex, extra, progressToken, "Indexing document with PageIndex…")
+      : await runIndex();
   } catch (e) {
     const errMsg = String(e);
     cli.writeLogs(docWorkspace, "", errMsg);
@@ -351,7 +404,9 @@ async function handleGetTree(
 async function handleSearch(
   input: Record<string, unknown>,
   registry: Registry,
-  config: Config
+  config: Config,
+  extra?: Extra,
+  progressToken?: ProgressToken
 ) {
   const query = String(input.query ?? "");
   if (!query) throw new PageIndexMcpError("QUERY_FAILED", "query is required");
@@ -383,22 +438,28 @@ async function handleSearch(
     });
   }
 
-  const result = await runQuery(
-    indexedDocs.map((d) => ({
-      documentId: d.documentId,
-      fileName: d.fileName,
-      treePath: d.treePath!,
-    })),
-    {
-      query,
-      documentIds: requestedIds,
-      maxResults: input.maxResults != null ? Number(input.maxResults) : 10,
-      includeReasoningPath: input.includeReasoningPath !== false,
-      includeSourceText: input.includeSourceText !== false,
-      model: input.model ? String(input.model) : undefined,
-    },
-    config
-  );
+  const runSearch = () =>
+    runQuery(
+      indexedDocs.map((d) => ({
+        documentId: d.documentId,
+        fileName: d.fileName,
+        treePath: d.treePath!,
+      })),
+      {
+        query,
+        documentIds: requestedIds,
+        maxResults: input.maxResults != null ? Number(input.maxResults) : 10,
+        includeReasoningPath: input.includeReasoningPath !== false,
+        includeSourceText: input.includeSourceText !== false,
+        model: input.model ? String(input.model) : undefined,
+      },
+      config
+    );
+
+  const result =
+    extra
+      ? await withProgress(runSearch, extra, progressToken, "Searching document trees…")
+      : await runSearch();
 
   return jsonContent(result);
 }
@@ -430,7 +491,9 @@ async function handleReindexDocument(
   input: Record<string, unknown>,
   cli: CliAdapter,
   registry: Registry,
-  config: Config
+  config: Config,
+  extra?: Extra,
+  progressToken?: ProgressToken
 ) {
   const documentId = sanitizeDocumentId(String(input.documentId ?? ""));
   const doc = registry.get(documentId);
@@ -454,7 +517,9 @@ async function handleReindexDocument(
     },
     cli,
     registry,
-    config
+    config,
+    extra,
+    progressToken
   );
 }
 

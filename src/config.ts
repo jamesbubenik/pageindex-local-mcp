@@ -11,6 +11,8 @@ export interface Config {
   llmBaseUrl: string;
   llmApiKey: string;
   llmTimeoutMs: number;
+  /** Max ms to wait for a PageIndex Python subprocess (indexing). Default: 600 000 (10 min). */
+  toolTimeoutMs: number;
   tocCheckPages: number;
   maxPagesPerNode: number;
   maxTokensPerNode: number;
@@ -79,6 +81,7 @@ export function loadConfig(): Config {
   const llmBaseUrl = env("PAGEINDEX_LLM_BASE_URL", "http://127.0.0.1:1234/v1");
   const llmApiKey = env("PAGEINDEX_LLM_API_KEY", "local");
   const llmTimeoutMs = envInt("PAGEINDEX_LLM_TIMEOUT_MS", 120_000);
+  const toolTimeoutMs = envInt("PAGEINDEX_TOOL_TIMEOUT_MS", 600_000);
   const tocCheckPages = envInt("PAGEINDEX_TOC_CHECK_PAGES", 20);
   const maxPagesPerNode = envInt("PAGEINDEX_MAX_PAGES_PER_NODE", 10);
   const maxTokensPerNode = envInt("PAGEINDEX_MAX_TOKENS_PER_NODE", 20000);
@@ -98,6 +101,7 @@ export function loadConfig(): Config {
     llmBaseUrl,
     llmApiKey,
     llmTimeoutMs,
+    toolTimeoutMs,
     tocCheckPages,
     maxPagesPerNode,
     maxTokensPerNode,
