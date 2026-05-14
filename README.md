@@ -269,14 +269,14 @@ Set `PAGEINDEX_MODEL` to the exact model name shown in LM Studio's server status
 
 **Timeout configuration**
 
-Indexing large PDFs can take several minutes. Two settings work together to prevent `MCP error -32001: Request timed out`:
+`pageindex_local_index_document` and `pageindex_local_reindex_document` now run indexing in the **background** — the tool call returns in under a second with `status: "indexing"` and a `documentId`. The Python subprocess continues running server-side, and you poll `pageindex_local_get_document` until status changes to `"indexed"` or `"failed"`. This completely eliminates client-side `-32001` timeout errors for indexing.
+
+`pageindex_local_search` is still synchronous. For very large document trees, you can raise the client timeout:
 
 | Setting | Where | What it controls |
 |---|---|---|
-| `"timeout": 600` | `mcp.json` (Cursor-notation) | Client-side wait (seconds). LM Studio and Cursor respect this field. |
-| `PAGEINDEX_TOOL_TIMEOUT_MS=600000` | `env` block or `.env` file | Server-side subprocess limit (milliseconds). The server aborts Python if it exceeds this. |
-
-Keep both values in sync — `timeout` in seconds equals `PAGEINDEX_TOOL_TIMEOUT_MS` divided by 1000. The server also sends MCP progress notifications every 10 seconds during indexing and search, which resets the client timer on clients that support `resetTimeoutOnProgress` (Claude Desktop, Claude Code, and Cursor all do).
+| `"timeout": 600` | `mcp.json` (Cursor-notation) | Client-side wait in seconds. |
+| `PAGEINDEX_TOOL_TIMEOUT_MS=600000` | `env` block or `.env` file | Server-side subprocess limit (milliseconds). |
 
 **Step 3 — Enable tool use**
 
@@ -345,6 +345,8 @@ Verifies the PageIndex repo, Python, workspace, and LLM config. Run this first.
 
 ### Index a PDF
 
+Indexing runs in the background. The tool returns immediately with `status: "indexing"` and a `documentId`. Poll `pageindex_local_get_document` until status is `"indexed"` (or `"failed"`).
+
 ```json
 {
   "tool": "pageindex_local_index_document",
@@ -355,6 +357,21 @@ Verifies the PageIndex repo, Python, workspace, and LLM config. Run this first.
     "addDocDescription": true
   }
 }
+```
+
+Response:
+```json
+{
+  "documentId": "550e8400-e29b-41d4-a716-446655440000",
+  "status": "indexing",
+  "fileName": "research-paper.pdf",
+  "message": "Indexing started in the background. Call pageindex_local_get_document with this documentId to poll for status."
+}
+```
+
+Then poll:
+```json
+{ "tool": "pageindex_local_get_document", "arguments": { "documentId": "550e8400-..." } }
 ```
 
 Index with node text (larger output, enables source text in search results):
@@ -432,6 +449,8 @@ Search across specific documents:
 ```
 
 ### Re-index a Document
+
+Like `index_document`, this returns immediately with `status: "indexing"`. Poll `pageindex_local_get_document` for completion.
 
 ```json
 {
@@ -514,13 +533,8 @@ Add the file's parent directory to `PAGEINDEX_ALLOWED_ROOTS` in your environment
 **Low-quality indexing results on scanned PDFs**
 PageIndex uses PyPDF2 for local PDF parsing, which does not perform OCR. Scanned PDFs without embedded text will produce poor results. For scanned documents, consider pre-processing with an OCR tool or using the PageIndex cloud service.
 
-**`MCP error -32001: Request timed out` in LM Studio (or other clients)**
-Indexing large documents or running multi-step searches can exceed the MCP client's default 60-second timeout. Fix with two coordinated settings:
-
-1. Add `"timeout": 600` (seconds) to your `mcp.json` server entry so the client waits longer.
-2. Set `PAGEINDEX_TOOL_TIMEOUT_MS=600000` (milliseconds) in the `env` block or your `.env` file so the server-side subprocess limit matches.
-
-The server also sends progress notifications every 10 seconds during indexing and search. Clients that support `resetTimeoutOnProgress` (Claude Desktop, Cursor, Claude Code) will automatically reset their timer on each notification, keeping the connection alive for the full duration of the operation without requiring a timeout increase.
+**`MCP error -32001: Request timed out` during search**
+Indexing no longer blocks — it runs in the background and returns immediately, so this error should not occur for `index_document` or `reindex_document`. If you still see it during `pageindex_local_search` (which is synchronous), add `"timeout": 600` to your `mcp.json` server entry and set `PAGEINDEX_TOOL_TIMEOUT_MS=600000` in the `env` block.
 
 **MCP server logs**
 All logs go to stderr (not stdout, which is reserved for the MCP protocol). Check your MCP client's stderr console or increase log level:
