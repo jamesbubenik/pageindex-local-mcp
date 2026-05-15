@@ -557,6 +557,20 @@ PAGEINDEX_LOG_LEVEL=debug
 
 ---
 
+## 12. Using with an AI Agent
+
+[`AGENT_SYSTEM_PROMPT.md`](./AGENT_SYSTEM_PROMPT.md) contains a ready-to-use system prompt for any AI agent that will drive this MCP server. It covers all 8 tools, every parameter and response field, typical workflows, error handling, and usage constraints.
+
+**How to use it:**
+
+1. Copy the full contents of `AGENT_SYSTEM_PROMPT.md`.
+2. Paste it into your agent's system prompt (or include it as a context file if your framework supports file injection).
+3. The agent will know how to index documents, search them, handle failures, and avoid common mistakes — without needing further instruction.
+
+This is useful when building automated pipelines, custom agents, or assistants that need to interact with local documents through this server.
+
+---
+
 ## MCP Tools Reference
 
 | Tool | Description |
