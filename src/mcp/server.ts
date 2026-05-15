@@ -5,7 +5,7 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { join, basename } from "node:path";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { randomUUID } from "node:crypto";
 import type { Config } from "../config.js";
 import type { DocumentRecord } from "../pageindex/types.js";
@@ -262,6 +262,22 @@ async function handleIndexDocument(
     }
 
     const treePath = await cli.storeTreeInWorkspace(generatedTreePath, docWorkspace);
+
+    // Validate the stored tree actually has content. PageIndex can produce a
+    // valid but empty JSON file when the LLM fails silently (e.g. model cold
+    // start, context overflow, malformed response). Catching this here marks
+    // the document as failed immediately so the agent reindexes right away
+    // instead of discovering the problem later during search.
+    const storedTree = JSON.parse(readFileSync(treePath, "utf8")) as { children?: unknown[] };
+    if (!storedTree.children || storedTree.children.length === 0) {
+      const errMsg =
+        "PageIndex produced an empty tree (no content sections). " +
+        "The LLM likely did not respond correctly during indexing — " +
+        "this often happens on the first run when the model is cold. " +
+        "Call pageindex_local_reindex_document to try again.";
+      await registry.updateStatus(documentId, "failed", { lastError: errMsg });
+      throw new PageIndexMcpError("INDEX_FAILED", errMsg);
+    }
 
     const metadataPath = join(docWorkspace, "index", "metadata.json");
     writeFileSync(

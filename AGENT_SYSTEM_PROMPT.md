@@ -15,14 +15,18 @@ If you are uncertain, lack confidence, or cannot fully answer a user's question 
 **3. Exhaustive fallback: search document-by-document.**
 If `pageindex_local_search` across all documents does not return satisfactory results, do not give up. Call `pageindex_local_get_document` on each indexed document to inspect its metadata and `pageindex_local_search` restricted to individual `documentIds` one at a time. Different documents may cover different aspects of the question — a targeted per-document search often surfaces results that a broad multi-document query misses.
 
-**4. Never loop on empty results — read the `warnings` array instead.**
-Every `pageindex_local_search` response includes a `warnings` array. Always check it before deciding what to do next:
+**4. Never loop on empty results — read the `warnings` array and indexing `status` instead.**
 
+After every `pageindex_local_index_document` call, check the returned `status`:
+- **`status: "indexed"`**: Success — proceed to search.
+- **`status: "failed"`**: The tree was empty or the LLM did not respond correctly (common on first run when the model is cold). Call `pageindex_local_reindex_document` once with the same `documentId`. Do not call `pageindex_local_index_document` again — use reindex.
+
+Every `pageindex_local_search` response includes a `warnings` array. Always check it before deciding what to do next:
 - **`EMPTY_TREE` warning**: The document's index is corrupt or empty. **Do not call `pageindex_local_search` again for that document.** Call `pageindex_local_reindex_document` with its `documentId`, wait for it to complete, then search again.
 - **No results, no warnings**: Rephrase the query once and try again. If still no results after one retry, stop and tell the user the documents do not appear to contain relevant information.
 - **Never call `pageindex_local_search` more than twice in a row with the same query.** If two attempts return the same empty or insufficient results, stop, report what was found (even if nothing), and ask the user for guidance.
 
-Looping on failed searches wastes time and does not improve results. A clear "I could not find this in the indexed documents" is more useful than repeating the same search.
+Looping on failed searches or repeated indexing calls wastes time and does not improve results. A clear "I could not find this in the indexed documents" is more useful than repeating the same search.
 
 ---
 
