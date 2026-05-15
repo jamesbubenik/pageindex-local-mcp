@@ -143,6 +143,88 @@ async function handleHealth(cli: CliAdapter) {
   return jsonContent(result);
 }
 
+// Sentinel thrown when PageIndex runs successfully but produces no tree content.
+class EmptyTreeError extends Error {
+  constructor() { super("Empty tree"); }
+}
+
+/**
+ * Run the PageIndex subprocess for one attempt, store the resulting tree, and
+ * validate it has content. Deletes any stale results file first so we can
+ * never accidentally pick up output from a previous run.
+ *
+ * Throws PageIndexMcpError on subprocess failure or missing output.
+ * Throws EmptyTreeError when the tree file exists but has no children
+ * (LLM produced no content — treat as retriable).
+ */
+async function runSubprocessAndStore(params: {
+  cli: CliAdapter;
+  fileType: "pdf" | "md";
+  workspacePath: string;
+  sourceFileName: string;
+  docWorkspace: string;
+  model: string | undefined;
+  input: Record<string, unknown>;
+}): Promise<string> {
+  const { cli, fileType, workspacePath, sourceFileName, docWorkspace, model, input } = params;
+
+  // Delete any stale PageIndex results file so this attempt's output is fresh.
+  const expectedResultPath = cli.discoverGeneratedTree(sourceFileName);
+  if (existsSync(expectedResultPath)) {
+    try { rmSync(expectedResultPath); } catch { /* best-effort */ }
+  }
+
+  const cmdResult =
+    fileType === "pdf"
+      ? await cli.indexPdf({
+          pdfPath: workspacePath,
+          model,
+          tocCheckPages: input.tocCheckPages != null ? Number(input.tocCheckPages) : undefined,
+          maxPagesPerNode: input.maxPagesPerNode != null ? Number(input.maxPagesPerNode) : undefined,
+          maxTokensPerNode: input.maxTokensPerNode != null ? Number(input.maxTokensPerNode) : undefined,
+          addNodeId: input.addNodeId !== false,
+          addNodeSummary: input.addNodeSummary !== false,
+          addDocDescription: input.addDocDescription !== false,
+          addNodeText: input.addNodeText === true,
+        })
+      : await cli.indexMarkdown({
+          mdPath: workspacePath,
+          model,
+          addNodeId: input.addNodeId !== false,
+          addNodeSummary: input.addNodeSummary !== false,
+          addDocDescription: input.addDocDescription !== false,
+          addNodeText: input.addNodeText === true,
+          ifThinning: input.ifThinning != null ? Boolean(input.ifThinning) : undefined,
+          thinningThreshold: input.thinningThreshold != null ? Number(input.thinningThreshold) : undefined,
+          summaryTokenThreshold: input.summaryTokenThreshold != null ? Number(input.summaryTokenThreshold) : undefined,
+        });
+
+  try { cli.writeLogs(docWorkspace, cmdResult.stdout, cmdResult.stderr); } catch { /* ignore */ }
+
+  if (!cmdResult.success) {
+    throw new PageIndexMcpError(
+      "INDEX_FAILED",
+      `Process exited with code ${cmdResult.exitCode}.\n${cmdResult.stderr || cmdResult.stdout}`
+    );
+  }
+
+  if (!existsSync(expectedResultPath)) {
+    throw new PageIndexMcpError(
+      "INDEX_FAILED",
+      `Tree file not found at expected location: ${expectedResultPath}`
+    );
+  }
+
+  const treePath = await cli.storeTreeInWorkspace(expectedResultPath, docWorkspace);
+
+  const storedTree = JSON.parse(readFileSync(treePath, "utf8")) as { children?: unknown[] };
+  if (!storedTree.children || storedTree.children.length === 0) {
+    throw new EmptyTreeError();
+  }
+
+  return treePath;
+}
+
 async function handleIndexDocument(
   input: Record<string, unknown>,
   cli: CliAdapter,
@@ -210,73 +292,42 @@ async function handleIndexDocument(
   await registry.updateStatus(documentId, "indexing");
 
   const runIndexing = async () => {
-    // Copy source to workspace
     let workspacePath = resolved;
     if (copyToWorkspace) {
       workspacePath = await cli.copySourceToWorkspace(resolved, docWorkspace);
     }
 
-    // Run PageIndex Python subprocess
-    const cmdResult =
-      fileType === "pdf"
-        ? await cli.indexPdf({
-            pdfPath: workspacePath,
-            model,
-            tocCheckPages: input.tocCheckPages != null ? Number(input.tocCheckPages) : undefined,
-            maxPagesPerNode: input.maxPagesPerNode != null ? Number(input.maxPagesPerNode) : undefined,
-            maxTokensPerNode: input.maxTokensPerNode != null ? Number(input.maxTokensPerNode) : undefined,
-            addNodeId: input.addNodeId !== false,
-            addNodeSummary: input.addNodeSummary !== false,
-            addDocDescription: input.addDocDescription !== false,
-            addNodeText: input.addNodeText === true,
-          })
-        : await cli.indexMarkdown({
-            mdPath: workspacePath,
-            model,
-            addNodeId: input.addNodeId !== false,
-            addNodeSummary: input.addNodeSummary !== false,
-            addDocDescription: input.addDocDescription !== false,
-            addNodeText: input.addNodeText === true,
-            ifThinning: input.ifThinning != null ? Boolean(input.ifThinning) : undefined,
-            thinningThreshold: input.thinningThreshold != null ? Number(input.thinningThreshold) : undefined,
-            summaryTokenThreshold: input.summaryTokenThreshold != null ? Number(input.summaryTokenThreshold) : undefined,
-          });
-
-    try { cli.writeLogs(docWorkspace, cmdResult.stdout, cmdResult.stderr); } catch { /* ignore */ }
-
-    if (!cmdResult.success) {
-      const errMsg = `Process exited with code ${cmdResult.exitCode}.\n${cmdResult.stderr || cmdResult.stdout}`;
-      await registry.updateStatus(documentId, "failed", { lastError: errMsg });
-      throw new PageIndexMcpError("INDEX_FAILED", errMsg);
-    }
-
     const sourceFileName = copyToWorkspace
       ? `source${fileType === "pdf" ? ".pdf" : ".md"}`
       : fileName;
-    const generatedTreePath = cli.discoverGeneratedTree(sourceFileName);
 
-    if (!existsSync(generatedTreePath)) {
-      const errMsg = `Tree file not found at expected location: ${generatedTreePath}`;
-      await registry.updateStatus(documentId, "failed", { lastError: errMsg });
-      throw new PageIndexMcpError("INDEX_FAILED", errMsg);
-    }
+    const subprocessParams = { cli, fileType, workspacePath, sourceFileName, docWorkspace, model, input };
 
-    const treePath = await cli.storeTreeInWorkspace(generatedTreePath, docWorkspace);
-
-    // Validate the stored tree actually has content. PageIndex can produce a
-    // valid but empty JSON file when the LLM fails silently (e.g. model cold
-    // start, context overflow, malformed response). Catching this here marks
-    // the document as failed immediately so the agent reindexes right away
-    // instead of discovering the problem later during search.
-    const storedTree = JSON.parse(readFileSync(treePath, "utf8")) as { children?: unknown[] };
-    if (!storedTree.children || storedTree.children.length === 0) {
-      const errMsg =
-        "PageIndex produced an empty tree (no content sections). " +
-        "The LLM likely did not respond correctly during indexing — " +
-        "this often happens on the first run when the model is cold. " +
-        "Call pageindex_local_reindex_document to try again.";
-      await registry.updateStatus(documentId, "failed", { lastError: errMsg });
-      throw new PageIndexMcpError("INDEX_FAILED", errMsg);
+    let treePath: string;
+    try {
+      treePath = await runSubprocessAndStore(subprocessParams);
+    } catch (e) {
+      if (e instanceof EmptyTreeError) {
+        // LLM produced no content — common on first run when the model is cold.
+        // Wait briefly and retry once before giving up.
+        logger.warn("Empty tree on first attempt — retrying after 5s (LLM may be warming up)", { documentId });
+        await new Promise<void>((r) => setTimeout(r, 5_000));
+        try {
+          treePath = await runSubprocessAndStore(subprocessParams);
+        } catch (retryErr) {
+          const errMsg =
+            retryErr instanceof EmptyTreeError
+              ? "PageIndex produced an empty tree on both attempts. The LLM is not generating content — check your model configuration and try again."
+              : String(retryErr);
+          await registry.updateStatus(documentId, "failed", { lastError: errMsg });
+          throw retryErr instanceof EmptyTreeError
+            ? new PageIndexMcpError("INDEX_FAILED", errMsg)
+            : retryErr;
+        }
+      } else {
+        await registry.updateStatus(documentId, "failed", { lastError: String(e) });
+        throw e;
+      }
     }
 
     const metadataPath = join(docWorkspace, "index", "metadata.json");
