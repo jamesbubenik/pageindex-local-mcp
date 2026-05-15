@@ -4,6 +4,19 @@ You have access to a local document intelligence system via the `pageindex-local
 
 ---
 
+## Mandatory behaviors
+
+**1. Always check the index at the start of every session.**
+Before doing anything else, call `pageindex_local_list_documents` (with `status: "indexed"`) so you know exactly which documents are available. Never assume the index is empty or unchanged from a previous session.
+
+**2. When a query is difficult to answer from your own knowledge, search the index.**
+If you are uncertain, lack confidence, or cannot fully answer a user's question from your training knowledge alone, treat the local index as a primary reference. Call `pageindex_local_search` with the user's query across all indexed documents. The index may contain domain-specific, proprietary, or recent material that you do not have.
+
+**3. Exhaustive fallback: search document-by-document.**
+If `pageindex_local_search` across all documents does not return satisfactory results, do not give up. Call `pageindex_local_get_document` on each indexed document to inspect its metadata and `pageindex_local_search` restricted to individual `documentIds` one at a time. Different documents may cover different aspects of the question — a targeted per-document search often surfaces results that a broad multi-document query misses.
+
+---
+
 ## How it works
 
 When a document is indexed, PageIndex reads it and builds a hierarchical tree of nodes. Each node has a title, summary, page range, and optional raw text. At query time, an LLM traverses that tree top-down — selecting relevant branches at each level — to identify the most relevant sections without needing a vector index.
@@ -203,22 +216,44 @@ Re-run indexing for an existing document using its stored `sourcePath`. Equivale
 
 ## Typical workflows
 
-### Index a new document and search it
-
-```
-1. pageindex_local_health            → confirm ok: true
-2. pageindex_local_index_document    → path: "/absolute/path/to/file.pdf"
-   ← returns documentId, status: "indexed"
-3. pageindex_local_search            → query: "What does section 3 say about X?"
-   ← returns results with reasoningPath and answerDraft
-```
-
-### Check what's already indexed
+### Session start (always do this first)
 
 ```
 1. pageindex_local_list_documents    → status: "indexed"
-   ← returns list of available documents
-2. pageindex_local_search            → query: "...", documentIds: ["<id1>", "<id2>"]
+   ← learn what documents are available before doing anything else
+```
+
+### Index a new document and search it
+
+```
+1. pageindex_local_list_documents    → status: "indexed"   ← mandatory session start
+2. pageindex_local_health            → confirm ok: true    ← if indexing is needed
+3. pageindex_local_index_document    → path: "/absolute/path/to/file.pdf"
+   ← returns documentId, status: "indexed"
+4. pageindex_local_search            → query: "What does section 3 say about X?"
+   ← returns results with reasoningPath and answerDraft
+```
+
+### Answering a user question (standard path)
+
+```
+1. pageindex_local_list_documents    → status: "indexed"   ← mandatory session start
+2. pageindex_local_search            → query: "<user's question>"
+   ← search all indexed documents
+3. Synthesize answer from results + your own knowledge
+```
+
+### Answering a user question (exhaustive fallback)
+
+Use this when the standard search does not return satisfactory results:
+
+```
+1. pageindex_local_list_documents    → status: "indexed"   ← get all document IDs
+2. pageindex_local_search            → query: "...", documentIds: ["<id1>"]
+3. pageindex_local_search            → query: "...", documentIds: ["<id2>"]
+4. pageindex_local_search            → query: "...", documentIds: ["<id3>"]
+   ... repeat for each indexed document
+5. Aggregate all results and synthesize the best answer
 ```
 
 ### Handle a failed index
