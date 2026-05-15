@@ -239,12 +239,6 @@ async function queryDocument(
 ): Promise<SearchResultItem[]> {
   const results: SearchResultItem[] = [];
   const topNodes = tree.children ?? [];
-
-  if (topNodes.length === 0) {
-    logger.warn("Document tree has no children", { documentId });
-    return results;
-  }
-
   const topRelevant = await selectRelevantNodes(topNodes, options.query, config, options.model);
   logger.debug("Top-level relevant nodes", { documentId, count: topRelevant.length });
 
@@ -356,6 +350,17 @@ export async function runQuery(
       tree = JSON.parse(readFileSync(doc.treePath, "utf8")) as PageIndexTree;
     } catch (e) {
       warnings.push(`Failed to parse tree for ${doc.documentId}: ${e}`);
+      continue;
+    }
+
+    if (!tree.children || tree.children.length === 0) {
+      logger.warn("Document tree has no children", { documentId: doc.documentId });
+      warnings.push(
+        `EMPTY_TREE: Document "${doc.fileName}" (${doc.documentId}) has an empty index tree — ` +
+        `no content sections were produced during indexing. ` +
+        `Do NOT retry pageindex_local_search for this document. ` +
+        `Call pageindex_local_reindex_document with this documentId to rebuild its index, then search again.`
+      );
       continue;
     }
 
